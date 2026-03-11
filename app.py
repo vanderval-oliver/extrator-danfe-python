@@ -1,52 +1,62 @@
+import os
+import re
 import pdfplumber
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
 
 app = Flask(__name__)
-CORS(app) # Isso permite que seu site no Netlify fale com esse Python
+CORS(app)
 
 @app.route('/')
-def home():
-    return "Servidor de Extracao DANFE Online!"
+def index():
+    return "Servidor DANFE Ativo"
 
 @app.route('/extrair', methods=['POST'])
 def extrair():
     if 'file' not in request.files:
-        return jsonify({"erro": "Sem arquivo"}), 400
+        return jsonify([]), 400
     
     file = request.files['file']
-    produtos = []
+    lista_produtos = []
     
-    with pdfplumber.open(file) as pdf:
-        texto = ""
-        for page in pdf.pages:
-            texto += page.extract_text() + "\n"
+    try:
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                # Extrai as tabelas da página
+                tabelas = page.extract_tables()
+                for tabela in tabelas:
+                    for linha in tabela:
+                        # Filtra linhas que parecem ter um EAN (13 dígitos)
+                        # Geralmente o EAN e a Descrição estão nas primeiras colunas
+                        texto_linha = " ".join([str(item) for item in linha if item])
+                        ean_match = re.search(r'(\d{13})', texto_linha)
+                        
+                        if ean_match:
+                            ean = ean_match.group(1)
+                            # O nome costuma ser o item mais longo da linha
+                            nome = max(linha, key=lambda x: len(str(x)) if x else 0)
+                            
+                            # Tenta achar a quantidade (procura números isolados na linha)
+                            # Filtramos apenas números que não sejam o EAN ou NCM
+                            qtd = 1
+                            for celula in linha:
+                                if celula and re.match(r'^\d+(?:,\d+)?$', str(celula)):
+                                    val = float(str(celula).replace(',', '.'))
+                                    if 0 < val < 1000: # Filtro simples para não pegar o EAN
+                                        qtd = int(val)
+                                        break
 
-        # Regex flexível para capturar: EAN (13 digitos) + Nome + Qtd
-        import re
-        # Procura 13 dígitos, pula um espaço e pega o que vem antes da unidade (UN, PC, etc)
-        linhas = texto.split('\n')
-        for linha in linhas:
-            ean_match = re.search(r'(\d{13})', linha)
-            if ean_match:
-                ean = ean_match.group(1)
-                # Tenta pegar a quantidade (procura um número com vírgula ou ponto no final da linha)
-                qtd_match = re.findall(r'(\d+(?:,\d+)?)', linha)
-                qtd = 1
-                if len(qtd_match) > 1:
-                    # Geralmente a quantidade é um dos últimos números da linha na DANFE
-                    val = qtd_match[-2].replace(',', '.')
-                    qtd = int(float(val)) if float(val) > 0 else 1
-
-                produtos.append({
-                    "e": ean,
-                    "n": "Item " + ean,
-                    "q": qtd,
-                    "c": 0
-                })
-
-    return jsonify(produtos)
+                            lista_produtos.append({
+                                "e": ean,
+                                "n": str(nome).strip()[:40].upper(),
+                                "q": qtd,
+                                "c": 0
+                            })
+        
+        # Se a extração por tabela falhar, ele usa o modo texto como backup
+        return jsonify(lista_produtos)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
