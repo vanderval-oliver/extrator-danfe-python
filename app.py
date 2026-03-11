@@ -1,72 +1,72 @@
-import os
-import re
 import pdfplumber
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import os
+import re
 
 app = Flask(__name__)
 CORS(app)
 
+# Memória para o celular buscar (sincronização)
 memoria_nota = {"produtos": [], "ativa": False}
 
 @app.route('/')
-def index():
-    return "Servidor Online - Extrator de Tabela Ativo"
+def home():
+    return "Servidor de Extracao DANFE Online!"
 
 @app.route('/extrair', methods=['POST'])
 def extrair():
     global memoria_nota
     if 'file' not in request.files:
-        return jsonify([]), 400
+        return jsonify({"erro": "Sem arquivo"}), 400
     
     file = request.files['file']
-    lista = []
+    produtos = []
     
-    try:
-        with pdfplumber.open(file) as pdf:
-            for page in pdf.pages:
-                # Extrai as tabelas da página
-                tabelas = page.extract_tables()
-                for tabela in tabelas:
-                    for linha in tabela:
-                        # Pula o cabeçalho ou linhas vazias
-                        if not linha or "DESCRIÇÃO" in str(linha[1]).upper():
-                            continue
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            # Extração por tabela resolve o problema da quantidade e nome
+            tabela = page.extract_table()
+            if not tabela:
+                continue
+                
+            for linha in tabela:
+                # Pula cabeçalhos ou linhas vazias
+                if not linha or "DESCRIÇÃO" in str(linha[1]).upper():
+                    continue
+                
+                try:
+                    descricao_bruta = str(linha[1]) # Coluna 2: Descrição e EAN
+                    qtd_bruta = str(linha[2])       # Coluna 3: Quantidade
+                    
+                    # 1. Busca o EAN (13 dígitos)
+                    ean_match = re.search(r'(\d{13})', descricao_bruta)
+                    if ean_match:
+                        ean = ean_match.group(1)
                         
-                        try:
-                            # Conforme o seu PDF:
-                            # Coluna 1 (índice 1): Descrição e Código de Barras
-                            # Coluna 2 (índice 2): Quantidade (QTD)
-                            
-                            descricao_completa = str(linha[1])
-                            qtd_bruta = str(linha[2])
+                        # 2. Pega o Nome real (tudo antes de "Cód. Barras")
+                        nome = descricao_bruta.split("Cód.")[0].split("C\xf3d.")[0].strip()
+                        nome = nome.replace('\n', ' ').upper()
+                        
+                        # 3. Pega a Quantidade exata da coluna QTD
+                        # Remove pontos de milhar e converte vírgula em ponto
+                        val_limpo = qtd_bruta.replace('.', '').replace(',', '.')
+                        qtd = int(float(val_limpo))
+                        
+                        produtos.append({
+                            "e": ean,
+                            "n": nome[:50],
+                            "q": qtd,
+                            "c": 0
+                        })
+                except Exception as e:
+                    continue
 
-                            # 1. Extrai o EAN (13 dígitos) de dentro da descrição
-                            ean_match = re.search(r'(\d{13})', descricao_completa)
-                            ean = ean_match.group(1) if ean_match else "0000000000000"
-
-                            # 2. Extrai apenas o Nome (remove a parte do "Cód. Barras")
-                            nome = descricao_completa.split("Cód.")[0].strip()
-                            nome = nome.replace('\n', ' ') # Remove quebras de linha
-
-                            # 3. Limpa a Quantidade (converte "40" ou "40,00" para 40)
-                            qtd_limpa = qtd_bruta.replace('.', '').replace(',', '.')
-                            qtd = int(float(qtd_limpa))
-
-                            if ean != "0000000000000":
-                                lista.append({
-                                    "e": ean, 
-                                    "n": nome[:50].upper(), 
-                                    "q": qtd, 
-                                    "c": 0
-                                })
-                        except:
-                            continue # Pula linhas que não seguem o padrão
-        
-        memoria_nota = {"produtos": lista, "ativa": True}
-        return jsonify(lista)
-    except Exception as e:
-        return jsonify({"erro": str(e)}), 500
+    if produtos:
+        memoria_nota = {"produtos": produtos, "ativa": True}
+        return jsonify(produtos)
+    
+    return jsonify({"erro": "Nenhum produto encontrado"}), 404
 
 @app.route('/obter-lista', methods=['GET'])
 def obter_lista():
