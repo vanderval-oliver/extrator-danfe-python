@@ -7,12 +7,11 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Banco de dados temporário na memória
 memoria_nota = {"produtos": [], "ativa": False}
 
 @app.route('/')
 def index():
-    return "Servidor DANFE Online"
+    return "Servidor Online - Busca por UN Ativa"
 
 @app.route('/extrair', methods=['POST'])
 def extrair():
@@ -26,39 +25,41 @@ def extrair():
     try:
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                # Extração por tabela é mais precisa para Nomes e Qtd
-                tabelas = page.extract_tables()
-                for tabela in tabelas:
-                    for linha in tabela:
-                        # Limpa valores nulos
-                        dados = [str(c).strip() for c in linha if c]
-                        texto_linha = " ".join(dados)
+                texto = page.extract_text()
+                linhas = texto.split('\n')
+                
+                for linha in linhas:
+                    # 1. Procura o EAN (13 dígitos)
+                    ean_match = re.search(r'(\d{13})', linha)
+                    
+                    if ean_match:
+                        ean = ean_match.group(1)
                         
-                        # Busca EAN (13 dígitos)
-                        ean_match = re.search(r'(\d{13})', texto_linha)
-                        if ean_match:
-                            ean = ean_match.group(1)
+                        # 2. Procura por UN, UND, PC ou CX seguido de um número (Quantidade)
+                        # O padrão busca: Sigla + Espaço(s) + Números (aceita vírgula decimal)
+                        qtd_match = re.search(r'(?:UN|UND|PC|CX)\s+(\d+[\d,.]*)', linha, re.IGNORECASE)
+                        
+                        if qtd_match:
+                            # Pega o número, remove pontos de milhar e troca vírgula por ponto
+                            qtd_str = qtd_match.group(1).replace('.', '').replace(',', '.')
+                            qtd = int(float(qtd_str))
+                        else:
+                            qtd = 1 # Caso não ache a sigla, assume 1
                             
-                            # O Nome costuma ser a célula mais longa da linha
-                            nome = max(dados, key=len) if dados else f"Item {ean}"
-                            if len(nome) < 5: nome = f"Produto {ean}"
-                            
-                            # Busca Quantidade (número isolado pequeno)
-                            qtd = 1
-                            for d in dados:
-                                d_limpo = d.replace(',', '.')
-                                if re.match(r'^\d+(\.\d+)?$', d_limpo):
-                                    val = float(d_limpo)
-                                    if 0 < val < 500: # Filtro para não pegar o EAN/NCM
-                                        qtd = int(val)
-                                        break
+                        # 3. Tenta extrair o nome (texto entre o EAN e a sigla UN)
+                        nome = "PRODUTO " + ean
+                        partes = re.split(r'\d{13}', linha)
+                        if len(partes) > 1:
+                            nome_bruto = partes[1].split('UN')[0].strip()
+                            if len(nome_bruto) > 5:
+                                nome = nome_bruto
 
-                            lista.append({
-                                "e": ean, 
-                                "n": nome[:40].upper(), 
-                                "q": qtd, 
-                                "c": 0
-                            })
+                        lista.append({
+                            "e": ean, 
+                            "n": nome[:40].upper(), 
+                            "q": qtd, 
+                            "c": 0
+                        })
         
         memoria_nota = {"produtos": lista, "ativa": True}
         return jsonify(lista)
