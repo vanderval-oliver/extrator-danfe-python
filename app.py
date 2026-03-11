@@ -11,7 +11,7 @@ memoria_nota = {"produtos": [], "ativa": False}
 
 @app.route('/')
 def index():
-    return "Servidor Online - Busca por UN Ativa"
+    return "Servidor Online - Extrator de Tabela Ativo"
 
 @app.route('/extrair', methods=['POST'])
 def extrair():
@@ -25,41 +25,43 @@ def extrair():
     try:
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                texto = page.extract_text()
-                linhas = texto.split('\n')
-                
-                for linha in linhas:
-                    # 1. Procura o EAN (13 dígitos)
-                    ean_match = re.search(r'(\d{13})', linha)
-                    
-                    if ean_match:
-                        ean = ean_match.group(1)
+                # Extrai as tabelas da página
+                tabelas = page.extract_tables()
+                for tabela in tabelas:
+                    for linha in tabela:
+                        # Pula o cabeçalho ou linhas vazias
+                        if not linha or "DESCRIÇÃO" in str(linha[1]).upper():
+                            continue
                         
-                        # 2. Procura por UN, UND, PC ou CX seguido de um número (Quantidade)
-                        # O padrão busca: Sigla + Espaço(s) + Números (aceita vírgula decimal)
-                        qtd_match = re.search(r'(?:UN|UND|PC|CX)\s+(\d+[\d,.]*)', linha, re.IGNORECASE)
-                        
-                        if qtd_match:
-                            # Pega o número, remove pontos de milhar e troca vírgula por ponto
-                            qtd_str = qtd_match.group(1).replace('.', '').replace(',', '.')
-                            qtd = int(float(qtd_str))
-                        else:
-                            qtd = 1 # Caso não ache a sigla, assume 1
+                        try:
+                            # Conforme o seu PDF:
+                            # Coluna 1 (índice 1): Descrição e Código de Barras
+                            # Coluna 2 (índice 2): Quantidade (QTD)
                             
-                        # 3. Tenta extrair o nome (texto entre o EAN e a sigla UN)
-                        nome = "PRODUTO " + ean
-                        partes = re.split(r'\d{13}', linha)
-                        if len(partes) > 1:
-                            nome_bruto = partes[1].split('UN')[0].strip()
-                            if len(nome_bruto) > 5:
-                                nome = nome_bruto
+                            descricao_completa = str(linha[1])
+                            qtd_bruta = str(linha[2])
 
-                        lista.append({
-                            "e": ean, 
-                            "n": nome[:40].upper(), 
-                            "q": qtd, 
-                            "c": 0
-                        })
+                            # 1. Extrai o EAN (13 dígitos) de dentro da descrição
+                            ean_match = re.search(r'(\d{13})', descricao_completa)
+                            ean = ean_match.group(1) if ean_match else "0000000000000"
+
+                            # 2. Extrai apenas o Nome (remove a parte do "Cód. Barras")
+                            nome = descricao_completa.split("Cód.")[0].strip()
+                            nome = nome.replace('\n', ' ') # Remove quebras de linha
+
+                            # 3. Limpa a Quantidade (converte "40" ou "40,00" para 40)
+                            qtd_limpa = qtd_bruta.replace('.', '').replace(',', '.')
+                            qtd = int(float(qtd_limpa))
+
+                            if ean != "0000000000000":
+                                lista.append({
+                                    "e": ean, 
+                                    "n": nome[:50].upper(), 
+                                    "q": qtd, 
+                                    "c": 0
+                                })
+                        except:
+                            continue # Pula linhas que não seguem o padrão
         
         memoria_nota = {"produtos": lista, "ativa": True}
         return jsonify(lista)
