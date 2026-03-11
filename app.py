@@ -7,56 +7,58 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+# Esta variável vai guardar a última nota processada na memória do servidor
+memoria_nota = {
+    "produtos": [],
+    "ativa": False
+}
+
 @app.route('/')
 def index():
-    return "Servidor DANFE Ativo"
+    return "Servidor DANFE com Memória Ativo"
 
 @app.route('/extrair', methods=['POST'])
 def extrair():
+    global memoria_nota
     if 'file' not in request.files:
         return jsonify([]), 400
     
     file = request.files['file']
-    lista_produtos = []
+    lista = []
     
     try:
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                # Extrai as tabelas da página
-                tabelas = page.extract_tables()
-                for tabela in tabelas:
-                    for linha in tabela:
-                        # Filtra linhas que parecem ter um EAN (13 dígitos)
-                        # Geralmente o EAN e a Descrição estão nas primeiras colunas
-                        texto_linha = " ".join([str(item) for item in linha if item])
-                        ean_match = re.search(r'(\d{13})', texto_linha)
-                        
-                        if ean_match:
-                            ean = ean_match.group(1)
-                            # O nome costuma ser o item mais longo da linha
-                            nome = max(linha, key=lambda x: len(str(x)) if x else 0)
-                            
-                            # Tenta achar a quantidade (procura números isolados na linha)
-                            # Filtramos apenas números que não sejam o EAN ou NCM
-                            qtd = 1
-                            for celula in linha:
-                                if celula and re.match(r'^\d+(?:,\d+)?$', str(celula)):
-                                    val = float(str(celula).replace(',', '.'))
-                                    if 0 < val < 1000: # Filtro simples para não pegar o EAN
-                                        qtd = int(val)
-                                        break
-
-                            lista_produtos.append({
-                                "e": ean,
-                                "n": str(nome).strip()[:40].upper(),
-                                "q": qtd,
-                                "c": 0
-                            })
+                texto = page.extract_text()
+                # Busca EAN (13 dígitos)
+                matches = re.finditer(r'(\d{13})', texto)
+                for m in matches:
+                    ean = m.group(1)
+                    # Busca quantidade simples após o EAN
+                    trecho = texto[m.end():m.end()+40]
+                    qtd_match = re.search(r'(\d+)', trecho)
+                    qtd = int(qtd_match.group(1)) if qtd_match else 1
+                    
+                    lista.append({"e": ean, "n": f"Item {ean}", "q": qtd, "c": 0})
         
-        # Se a extração por tabela falhar, ele usa o modo texto como backup
-        return jsonify(lista_produtos)
+        # SALVA NA MEMÓRIA PARA O CELULAR PEGAR DEPOIS
+        memoria_nota["produtos"] = lista
+        memoria_nota["ativa"] = True
+        return jsonify(lista)
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
+
+# ROTA NOVA: O Celular vai chamar isso aqui para baixar a lista do PC
+@app.route('/obter-lista', methods=['GET'])
+def obter_lista():
+    return jsonify(memoria_nota)
+
+# ROTA NOVA: Para limpar a conferência
+@app.route('/limpar', methods=['POST'])
+def limpar():
+    global memoria_nota
+    memoria_nota = {"produtos": [], "ativa": False}
+    return jsonify({"status": "limpo"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
