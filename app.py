@@ -1,14 +1,21 @@
-import pdfplumber
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import pdfplumber
 import os
+import json
 import re
 from datetime import datetime
+from groq import Groq
 
 app = Flask(__name__)
 CORS(app)
 
-# Estrutura exata que o frontend espera
+# --- CONFIGURAÇÃO DE SEGURANÇA ---
+# No Render, vá em 'Environment' e adicione GROQ_API_KEY com seu token gsk_...
+GROQ_KEY = os.environ.get("GROQ_API_KEY")
+client = Groq(api_key=GROQ_KEY)
+
+# Estrutura de memória para o coletor
 memoria_nota = {
     "produtos": [], 
     "ativa": False,
@@ -18,7 +25,7 @@ memoria_nota = {
 
 @app.route('/')
 def home():
-    return "API DANFE Online - Coletor Cloud Pro"
+    return "API DANFE Online - Coletor Cloud Pro (Groq Powered)"
 
 @app.route('/extrair', methods=['POST'])
 def extrair():
@@ -28,125 +35,77 @@ def extrair():
         return jsonify({"erro": "Sem arquivo"}), 400
     
     file = request.files['file']
-    produtos = []
+    texto_bruto = ""
     
-    print(f"Processando arquivo: {file.filename}")
+    print(f"Lendo PDF: {file.filename}")
     
-    with pdfplumber.open(file) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            print(f"Processando página {page_num + 1}")
-            
-            # Extrai texto da página para debug
-            texto = page.extract_text()
-            if texto:
-                print(f"Texto da página: {texto[:200]}...")
-            
-            # Tenta extrair tabelas
-            tabelas = page.extract_tables()
-            
-            for tabela_idx, tabela in enumerate(tabelas):
-                print(f"Tabela {tabela_idx + 1} encontrada")
-                
-                for linha_idx, linha in enumerate(tabela):
-                    if not linha:
-                        continue
+    try:
+        # 1. Extração de texto simplificada (extrai palavras, ignora a estrutura da tabela)
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                texto_extraido = page.extract_text()
+                if texto_extraido:
+                    texto_bruto += texto_extraido + "\n"
                     
-                    # Filtra linhas de cabeçalho
-                    linha_texto = ' '.join([str(cell) for cell in linha if cell]).upper()
-                    if any(palavra in linha_texto for palavra in ["DESCRIÇÃO", "DESCRICAO", "CÓDIGO", "CODIGO", "QTDE", "QUANT"]):
-                        continue
-                    
-                    try:
-                        # Procura por EAN (código de barras de 13 dígitos)
-                        ean = None
-                        for cell in linha:
-                            cell_str = str(cell) if cell else ""
-                            # Procura por padrões de EAN
-                            codigos = re.findall(r'(\d{13})', cell_str)
-                            if codigos:
-                                ean = codigos[0]
-                                print(f"EAN encontrado: {ean}")
-                                break
-                        
-                        if not ean:
-                            # Tenta no texto completo da linha
-                            codigos = re.findall(r'(\d{13})', linha_texto)
-                            if codigos:
-                                ean = codigos[0]
-                                print(f"EAN encontrado na linha: {ean}")
-                        
-                        # Procura por quantidade
-                        quantidade = None
-                        for cell in linha:
-                            cell_str = str(cell) if cell else ""
-                            # Remove pontos de milhar e converte vírgula
-                            cell_clean = cell_str.replace('.', '').replace(',', '.').strip()
-                            if cell_clean and cell_clean.replace('.', '').isdigit():
-                                try:
-                                    valor = float(cell_clean)
-                                    if valor < 1000:  # Quantidade geralmente é um número pequeno
-                                        quantidade = int(valor)
-                                        print(f"Quantidade encontrada: {quantidade}")
-                                        break
-                                except:
-                                    pass
-                        
-                        # Se encontrou EAN e quantidade, cria o produto
-                        if ean and quantidade:
-                            # Tenta extrair o nome do produto
-                            nome = "PRODUTO"
-                            for cell in linha:
-                                cell_str = str(cell) if cell else ""
-                                # Se a célula contém texto e não é número longo
-                                if cell_str and len(cell_str) > 3 and not re.match(r'^[\d\s,.-]+$', cell_str):
-                                    nome = cell_str.strip()
-                                    break
-                            
-                            # Limita o tamanho do nome
-                            nome = nome[:50].upper()
-                            
-                            # Verifica se já existe (evita duplicatas)
-                            existe = False
-                            for p in produtos:
-                                if p['e'] == ean:
-                                    existe = True
-                                    break
-                            
-                            if not existe:
-                                produtos.append({
-                                    "e": ean,        # ean
-                                    "n": nome,       # nome
-                                    "q": quantidade, # quantidade
-                                    "c": 0           # conferido (0 = não)
-                                })
-                                print(f"Produto adicionado: {nome} - {ean} - Qtd: {quantidade}")
-                    
-                    except Exception as e:
-                        print(f"Erro ao processar linha: {e}")
-                        continue
-    
-    # Se encontrou produtos, atualiza a memória
-    if produtos:
-        memoria_nota = {
-            "produtos": produtos,
-            "ativa": True,
-            "timestamp": datetime.now().isoformat(),
-            "nome_arquivo": file.filename
-        }
-        print(f"Total de {len(produtos)} produtos extraídos com sucesso!")
-        return jsonify({
-            "status": "sucesso",
-            "quantidade": len(produtos),
-            "produtos": produtos
-        })
-    
-    print("Nenhum produto encontrado no PDF")
-    return jsonify({"erro": "Nenhum produto encontrado"}), 404
+        if not texto_bruto.strip():
+            return jsonify({"erro": "O PDF parece ser uma imagem. Use PDFs digitais."}), 400
+
+        # 2. Chamada à IA do Groq para organizar os dados
+        # Usamos o modelo Llama 3 8B que é gratuito, rápido e preciso para JSON
+        prompt_ia = f"""
+        Extraia os produtos deste texto de Nota Fiscal e retorne APENAS um array JSON.
+        Cada objeto do array deve ter:
+        "e": Código de barras (EAN/GTIN) - apenas os números.
+        "n": Nome do produto (em letras maiúsculas, remova códigos internos).
+        "q": Quantidade total (apenas número).
+        "c": 0 (valor padrão para conferência).
+
+        Texto da nota:
+        {texto_bruto[:7000]}
+        """
+
+        completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "Você é um assistente logístico que extrai dados de DANFE. Responda apenas com o JSON puro, sem textos extras ou explicações."
+                },
+                {"role": "user", "content": prompt_ia}
+            ],
+            model="llama3-8b-8192",
+            temperature=0, # Garante que a IA não invente dados
+        )
+        
+        # Limpeza da resposta da IA (caso venha com blocos de código markdown)
+        resposta_ia = completion.choices[0].message.content.strip()
+        resposta_ia = re.sub(r'```json|```', '', resposta_ia).strip()
+        
+        # 3. Converter texto da IA em lista Python
+        lista_produtos = json.loads(resposta_ia)
+        
+        if lista_produtos:
+            memoria_nota = {
+                "produtos": lista_produtos,
+                "ativa": True,
+                "timestamp": datetime.now().isoformat(),
+                "nome_arquivo": file.filename
+            }
+            print(f"Sucesso! {len(lista_produtos)} itens carregados.")
+            return jsonify({
+                "status": "sucesso", 
+                "quantidade": len(lista_produtos),
+                "produtos": lista_produtos
+            })
+        
+        return jsonify({"erro": "A IA não encontrou produtos no texto."}), 404
+
+    except Exception as e:
+        print(f"Erro no processamento: {str(e)}")
+        return jsonify({"erro": "Falha ao processar a nota."}), 500
 
 @app.route('/obter-lista', methods=['GET'])
 def obter_lista():
-    """Endpoint que o frontend mobile consulta"""
-    # Formato exato que o frontend espera
+    """Endpoint que o celular consulta para baixar a lista de conferência"""
     return jsonify({
         "produtos": memoria_nota["produtos"],
         "ativa": memoria_nota["ativa"]
@@ -154,7 +113,7 @@ def obter_lista():
 
 @app.route('/limpar', methods=['POST'])
 def limpar():
-    """Limpa a memória da nota atual"""
+    """Apaga a nota atual da memória"""
     global memoria_nota
     memoria_nota = {
         "produtos": [], 
@@ -162,22 +121,17 @@ def limpar():
         "timestamp": None,
         "nome_arquivo": None
     }
-    print("Memória limpa!")
     return jsonify({"status": "limpo"})
 
-# Endpoint extra para verificar status
 @app.route('/status', methods=['GET'])
 def status():
-    """Retorna status atual da memória"""
     return jsonify({
-        "memoria_ativa": memoria_nota["ativa"],
-        "total_produtos": len(memoria_nota["produtos"]),
-        "timestamp": memoria_nota["timestamp"],
-        "arquivo": memoria_nota["nome_arquivo"]
+        "ativa": memoria_nota["ativa"],
+        "arquivo": memoria_nota["nome_arquivo"],
+        "total_itens": len(memoria_nota["produtos"])
     })
 
 if __name__ == '__main__':
+    # Configuração para rodar no Render (lendo a porta da variável de ambiente)
     port = int(os.environ.get('PORT', 5000))
-    print(f"Servidor iniciado na porta {port}")
-    print(f"API URL: http://localhost:{port}")
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port)
