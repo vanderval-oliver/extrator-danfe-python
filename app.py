@@ -18,15 +18,14 @@ def extrair():
         if not texto_bruto.strip():
             return jsonify({"erro": "PDF sem texto legível"}), 400
 
-        # Chamada ao Groq
-        completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": "Responda APENAS com um array JSON puro. Não use markdown nem textos explicativos."},
-                {"role": "user", "content": f"Extraia EAN(e), Nome(n), Qtd(q) em JSON: {texto_bruto[:6000]}"}
-            ],
-            model="llama3-8b-8192",
-            temperature=0,
-        )
+        # Chamada ao Groqcompletion = client.chat.completions.create(
+    messages=[
+        {"role": "system", "content": "Você é um assistente logístico que extrai dados de DANFE. Responda apenas com o JSON puro, sem textos extras."},
+        {"role": "user", "content": prompt_ia}
+    ],
+    model="llama-3.3-70b-versatile", # Atualizado aqui!
+    temperature=0
+)
         
         resposta_ia = completion.choices[0].message.content.strip()
         
@@ -54,3 +53,4 @@ def extrair():
     except Exception as e:
         print(f"ERRO: {str(e)}") # Isso aparecerá nos LOGS do Render
         return jsonify({"erro": str(e)}), 500
+
